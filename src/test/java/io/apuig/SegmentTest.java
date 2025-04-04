@@ -9,12 +9,19 @@ import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMoc
 import com.github.tomakehurst.wiremock.client.WireMock;
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
 import com.github.tomakehurst.wiremock.stubbing.ServeEvent;
+import com.segment.analytics.kotlin.core.Analytics;
 import com.segment.analytics.kotlin.core.Configuration;
 import com.segment.analytics.kotlin.core.RequestFactory;
+import com.segment.analytics.kotlin.core.Storage;
+import com.segment.analytics.kotlin.core.StorageProvider;
 import com.segment.analytics.kotlin.core.Telemetry;
 import com.segment.analytics.kotlin.core.compat.Builders;
 import com.segment.analytics.kotlin.core.compat.ConfigurationBuilder;
 import com.segment.analytics.kotlin.core.compat.JavaAnalytics;
+import com.segment.analytics.kotlin.core.utilities.FileEventStream;
+import com.segment.analytics.kotlin.core.utilities.PropertiesFile;
+import com.segment.analytics.kotlin.core.utilities.StorageImpl;
+import java.io.File;
 import java.net.HttpURLConnection;
 import java.nio.file.Path;
 import java.util.Iterator;
@@ -24,9 +31,13 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor.AbortPolicy;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import kotlin.Unit;
+import kotlin.coroutines.Continuation;
+import kotlinx.coroutines.CoroutineDispatcher;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import sovran.kotlin.Store;
 import wiremock.com.fasterxml.jackson.core.JsonProcessingException;
 import wiremock.com.fasterxml.jackson.databind.JsonNode;
 import wiremock.com.fasterxml.jackson.databind.ObjectMapper;
@@ -64,6 +75,56 @@ public class SegmentTest {
                 })
                 .build();
 
+        conf.setStorageProvider(new StorageProvider() {
+            @Override
+            public Storage createStorage(Object... params) {
+                Analytics analytics = (Analytics) params[0];
+                Configuration config = analytics.getConfiguration();
+                String writeKey = config.getWriteKey();
+                File directory = new File("/tmp/analytics-kotlin/" + writeKey);
+                File eventDirectory = new File(directory, "events");
+                String fileIndexKey = "segment.events.file.index." + writeKey;
+                File userPrefs = new File(directory, "analytics-kotlin-" + writeKey + ".properties");
+                PropertiesFile propertiesFile = new PropertiesFile(userPrefs);
+                FileEventStream eventStream = new FileEventStream(eventDirectory);
+                return new StorageImpl(
+                        propertiesFile,
+                        eventStream,
+                        analytics.getStore(),
+                        config.getWriteKey(),
+                        fileIndexKey,
+                        analytics.getFileIODispatcher()) {
+                    @Override
+                    public Object write(Constants key, String value, Continuation<? super Unit> $completion) {
+                        try {
+                            Thread.sleep(200);
+                        } catch (InterruptedException e) {
+                        }
+                        return super.write(key, value, $completion);
+                    }
+
+                    @Override
+                    public String read(Constants arg0) {
+                        try {
+                            Thread.sleep(200);
+                        } catch (InterruptedException e) {
+                        }
+                        return super.read(arg0);
+                    }
+                };
+            }
+
+            @Override
+            public Storage getStorage(
+                    com.segment.analytics.kotlin.core.Analytics arg0,
+                    Store arg1,
+                    String arg2,
+                    CoroutineDispatcher arg3,
+                    Object arg4) {
+                throw new IllegalStateException("expect createStorage");
+            }
+        });
+
         return new JavaAnalytics(conf);
     }
 
@@ -77,8 +138,8 @@ public class SegmentTest {
         int requestsPerSecond = 1_000;
         int numClients = 10;
 
-        int timeToRun = 60_000 * 2;
-        int timeToRestore = 60_000 * 1;
+        int timeToRun = 60_000 * 5;
+        int timeToRestore = 60_000 * 4;
 
         int httpResponseDelay = 1_000;
 
@@ -100,7 +161,8 @@ public class SegmentTest {
             if (rate.tryAcquire()) {
                 exec.submit(() -> {
                     analytics.track("track", Builders.buildJsonObject(o -> {
-                        o.put("msgId", id.getAndIncrement()).put("content", RandomStringUtils.randomAlphanumeric(100));
+                        o.put("msgId", id.getAndIncrement())
+                                .put("content", RandomStringUtils.randomAlphanumeric(10_000));
                     }));
                 });
             }
